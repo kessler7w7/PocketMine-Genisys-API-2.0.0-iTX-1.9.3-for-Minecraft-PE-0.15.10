@@ -21,11 +21,17 @@
 
 namespace pocketmine\item;
 
-use pocketmine\block\Block;
-
-class AcaciaDoor extends Door{
+class BakedPotato extends Food{
 	public function __construct($meta = 0, $count = 1){
-		$this->block = Block::get(Item::ACACIA_DOOR_BLOCK);
-		parent::__construct(self::ACACIA_DOOR, 0, $count, "Acacia Door");
+		parent::__construct(self::BAKED_POTATO, $meta, $count, "Baked Potato");
+	}
+
+	public function getFoodRestore() : int{
+		return 5;
+	}
+
+	public function getSaturationRestore() : float{
+		return 7.2;
 	}
 }
+

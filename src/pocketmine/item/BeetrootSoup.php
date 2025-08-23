@@ -21,11 +21,27 @@
 
 namespace pocketmine\item;
 
-use pocketmine\block\Block;
 
-class AcaciaDoor extends Door{
+class BeetrootSoup extends Food{
 	public function __construct($meta = 0, $count = 1){
-		$this->block = Block::get(Item::ACACIA_DOOR_BLOCK);
-		parent::__construct(self::ACACIA_DOOR, 0, $count, "Acacia Door");
+		parent::__construct(self::BEETROOT_SOUP, 0, $count, "Beetroot Soup");
 	}
+	
+	public function getMaxStackSize() : int{
+		return 1;
+	}
+	
+	public function getFoodRestore() : int{
+		return 6;
+	}
+
+	public function getSaturationRestore() : float{
+		return 7.2;
+	}
+	
+	public function getResidue(){
+		return Item::get(Item::BOWL);
+	}
+
+	
 }
