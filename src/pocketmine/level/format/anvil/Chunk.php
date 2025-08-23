@@ -21,166 +21,348 @@
 
 namespace pocketmine\level\format\anvil;
 
-use pocketmine\level\format\FullChunk;
-use pocketmine\level\format\mcregion\McRegion;
-use pocketmine\level\Level;
+use pocketmine\level\format\generic\BaseChunk;
+use pocketmine\level\format\generic\EmptyChunkSection;
+use pocketmine\level\format\LevelProvider;
 use pocketmine\nbt\NBT;
 use pocketmine\nbt\tag\ByteTag;
 use pocketmine\nbt\tag\ByteArrayTag;
 use pocketmine\nbt\tag\CompoundTag;
-use pocketmine\network\protocol\FullChunkDataPacket;
-use pocketmine\tile\Spawnable;
+use pocketmine\nbt\tag\ListTag;
+use pocketmine\nbt\tag\IntTag;
+use pocketmine\nbt\tag\IntArrayTag;
+use pocketmine\nbt\tag\LongTag;
+use pocketmine\Player;
+use pocketmine\utils\Binary;
 use pocketmine\utils\BinaryStream;
-use pocketmine\utils\ChunkException;
 
+class Chunk extends BaseChunk{
 
-class Anvil extends McRegion{
+	/** @var CompoundTag */
+	protected $nbt;
 
-	/** @var RegionLoader[] */
-	protected $regions = [];
+	public function __construct($level, CompoundTag $nbt = null){
+		if($nbt === null){
+			$this->provider = $level;
+			$this->nbt = new CompoundTag("Level", []);
+			return;
+		}
 
-	/** @var Chunk[] */
-	protected $chunks = [];
+		$this->nbt = $nbt;
 
-	public static function getProviderName(){
-		return "anvil";
-	}
+		if(!isset($this->nbt->Entities) or !($this->nbt->Entities instanceof ListTag)){
+			$this->nbt->Entities = new ListTag("Entities", []);
+			$this->nbt->Entities->setTagType(NBT::TAG_Compound);
+		}
 
-	public static function getProviderOrder(){
-		return self::ORDER_YZX;
-	}
+		if(!isset($this->nbt->TileEntities) or !($this->nbt->TileEntities instanceof ListTag)){
+			$this->nbt->TileEntities = new ListTag("TileEntities", []);
+			$this->nbt->TileEntities->setTagType(NBT::TAG_Compound);
+		}
 
-	public static function usesChunkSection(){
-		return true;
-	}
+		if(!isset($this->nbt->TileTicks) or !($this->nbt->TileTicks instanceof ListTag)){
+			$this->nbt->TileTicks = new ListTag("TileTicks", []);
+			$this->nbt->TileTicks->setTagType(NBT::TAG_Compound);
+		}
 
-	public static function isValid($path){
-		$isValid = (file_exists($path . "/level.dat") and is_dir($path . "/region/"));
+		if(!isset($this->nbt->Sections) or !($this->nbt->Sections instanceof ListTag)){
+			$this->nbt->Sections = new ListTag("Sections", []);
+			$this->nbt->Sections->setTagType(NBT::TAG_Compound);
+		}
 
-		if($isValid){
-			$files = glob($path . "/region/*.mc*");
-			foreach($files as $f){
-				if(strpos($f, ".mcr") !== false){ //McRegion
-					$isValid = false;
-					break;
+		if(!isset($this->nbt->BiomeColors) or !($this->nbt->BiomeColors instanceof IntArrayTag)){
+			$this->nbt->BiomeColors = new IntArrayTag("BiomeColors", array_fill(0, 256, 0));
+		}
+
+		if(!isset($this->nbt->HeightMap) or !($this->nbt->HeightMap instanceof IntArrayTag)){
+			$this->nbt->HeightMap = new IntArrayTag("HeightMap", array_fill(0, 256, 0));
+		}
+
+		$sections = [];
+		foreach($this->nbt->Sections as $section){
+			if($section instanceof CompoundTag){
+				$y = (int) $section["Y"];
+				if($y < 8){
+					$sections[$y] = new ChunkSection($section);
 				}
 			}
 		}
-
-		return $isValid;
-	}
-
-	public function requestChunkTask($x, $z){
-		$chunk = $this->getChunk($x, $z, false);
-		if(!($chunk instanceof Chunk)){
-			throw new ChunkException("Invalid Chunk sent");
+		for($y = 0; $y < 8; ++$y){
+			if(!isset($sections[$y])){
+				$sections[$y] = new EmptyChunkSection($y);
+			}
 		}
 
-		if($this->getServer()->asyncChunkRequest){
-			$task = new ChunkRequestTask($this->getLevel(), $chunk);
-			$this->getServer()->getScheduler()->scheduleAsyncTask($task);
+		$extraData = [];
+
+		if(!isset($this->nbt->ExtraData) or !($this->nbt->ExtraData instanceof ByteArrayTag)){
+			$this->nbt->ExtraData = new ByteArrayTag("ExtraData", Binary::writeInt(0));
 		}else{
-			$tiles = "";
-
-			if(count($chunk->getTiles()) > 0){
-				$nbt = new NBT(NBT::LITTLE_ENDIAN);
-				$list = [];
-				foreach($chunk->getTiles() as $tile){
-					if($tile instanceof Spawnable){
-						$list[] = $tile->getSpawnCompound();
-					}
-				}
-				$nbt->setData($list);
-				$tiles = $nbt->write();
+			$stream = new BinaryStream($this->nbt->ExtraData->getValue());
+			$count = $stream->getInt();
+			for($i = 0; $i < $count; ++$i){
+				$key = $stream->getInt();
+				$extraData[$key] = $stream->getShort();
 			}
-
-			$extraData = new BinaryStream();
-			$extraData->putLInt(count($chunk->getBlockExtraDataArray()));
-			foreach($chunk->getBlockExtraDataArray() as $key => $value){
-				$extraData->putLInt($key);
-				$extraData->putLShort($value);
-			}
-
-			$ordered = $chunk->getBlockIdArray() .
-				$chunk->getBlockDataArray() .
-				$chunk->getBlockSkyLightArray() .
-				$chunk->getBlockLightArray() .
-				pack("C*", ...$chunk->getHeightMapArray()) .
-				pack("N*", ...$chunk->getBiomeColorArray()) .
-				$extraData->getBuffer() .
-				$tiles;
-
-			$this->getLevel()->chunkRequestCallback($x, $z, $ordered, FullChunkDataPacket::ORDER_LAYERED);
 		}
 
-		return null;
+		parent::__construct($level, (int) $this->nbt["xPos"], (int) $this->nbt["zPos"], $sections, $this->nbt->BiomeColors->getValue(), $this->nbt->HeightMap->getValue(), $this->nbt->Entities->getValue(), $this->nbt->TileEntities->getValue());
+
+		if(isset($this->nbt->Biomes)){
+			$this->checkOldBiomes($this->nbt->Biomes->getValue());
+			unset($this->nbt->Biomes);
+		}
+
+		unset($this->nbt->Sections, $this->nbt->ExtraData);
+	}
+
+	public function isLightPopulated(){
+		return $this->nbt["LightPopulated"] > 0;
+	}
+
+	public function setLightPopulated($value = 1){
+		$this->nbt->LightPopulated = new ByteTag("LightPopulated", $value);
+		$this->hasChanged = true;
 	}
 
 	/**
-	 * @param $x
-	 * @param $z
-	 *
-	 * @return RegionLoader
+	 * @return bool
 	 */
-	protected function getRegion($x, $z){
-		return isset($this->regions[$index = Level::chunkHash($x, $z)]) ? $this->regions[$index] : null;
+	public function isPopulated(){
+		return $this->nbt["TerrainPopulated"] > 0;
 	}
 
 	/**
-	 * @param int  $chunkX
-	 * @param int  $chunkZ
-	 * @param bool $create
+	 * @param int $value
+	 */
+	public function setPopulated($value = 1){
+		$this->nbt->TerrainPopulated = new ByteTag("TerrainPopulated", $value);
+		$this->hasChanged = true;
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function isGenerated(){
+		return $this->nbt["TerrainPopulated"] > 0 or (isset($this->nbt->TerrainGenerated) and $this->nbt["TerrainGenerated"] > 0);
+	}
+
+	/**
+	 * @param int $value
+	 */
+	public function setGenerated($value = 1){
+		$this->nbt->TerrainGenerated = new ByteTag("TerrainGenerated", $value);
+		$this->hasChanged = true;
+	}
+
+	/**
+	 * @return CompoundTag
+	 */
+	public function getNBT(){
+		return $this->nbt;
+	}
+
+	/**
+	 * @param string        $data
+	 * @param LevelProvider $provider
 	 *
 	 * @return Chunk
 	 */
-	public function getChunk($chunkX, $chunkZ, $create = false){
-		return parent::getChunk($chunkX, $chunkZ, $create);
+	public static function fromBinary($data, LevelProvider $provider = null){
+		$nbt = new NBT(NBT::BIG_ENDIAN);
+
+		try{
+			$nbt->readCompressed($data, ZLIB_ENCODING_DEFLATE);
+			$chunk = $nbt->getData();
+
+			if(!isset($chunk->Level) or !($chunk->Level instanceof CompoundTag)){
+				return null;
+			}
+
+			return new Chunk($provider instanceof LevelProvider ? $provider : Anvil::class, $chunk->Level);
+		}catch(\Throwable $e){
+			return null;
+		}
 	}
 
-	public function setChunk($chunkX, $chunkZ, FullChunk $chunk){
-		if(!($chunk instanceof Chunk)){
-			throw new ChunkException("Invalid Chunk class");
+	/**
+	 * @param string        $data
+	 * @param LevelProvider $provider
+	 *
+	 * @return Chunk
+	 */
+	public static function fromFastBinary($data, LevelProvider $provider = null){
+		$nbt = new NBT(NBT::BIG_ENDIAN);
+
+		try{
+			$nbt->read($data);
+			$chunk = $nbt->getData();
+
+			if(!isset($chunk->Level) or !($chunk->Level instanceof CompoundTag)){
+				return null;
+			}
+
+			return new Chunk($provider instanceof LevelProvider ? $provider : Anvil::class, $chunk->Level);
+		}catch(\Throwable $e){
+			return null;
+		}
+	}
+
+	public function toFastBinary(){
+		$nbt = clone $this->getNBT();
+
+		$nbt->xPos = new IntTag("xPos", $this->x);
+		$nbt->zPos = new IntTag("zPos", $this->z);
+
+		$nbt->Sections = new ListTag("Sections", []);
+		$nbt->Sections->setTagType(NBT::TAG_Compound);
+		foreach($this->getSections() as $section){
+			if($section instanceof EmptyChunkSection){
+				continue;
+			}
+			$nbt->Sections[$section->getY()] = new CompoundTag(null, [
+				"Y" => new ByteTag("Y", $section->getY()),
+				"Blocks" => new ByteArrayTag("Blocks", $section->getIdArray()),
+				"Data" => new ByteArrayTag("Data", $section->getDataArray()),
+				"BlockLight" => new ByteArrayTag("BlockLight", $section->getLightArray()),
+				"SkyLight" => new ByteArrayTag("SkyLight", $section->getSkyLightArray())
+			]);
 		}
 
-		$chunk->setProvider($this);
+		$nbt->BiomeColors = new IntArrayTag("BiomeColors", $this->getBiomeColorArray());
 
-		self::getRegionIndex($chunkX, $chunkZ, $regionX, $regionZ);
-		$this->loadRegion($regionX, $regionZ);
+		$nbt->HeightMap = new IntArrayTag("HeightMap", $this->getHeightMapArray());
 
-		$chunk->setX($chunkX);
-		$chunk->setZ($chunkZ);
-		$this->chunks[Level::chunkHash($chunkX, $chunkZ)] = $chunk;
-	}
+		$entities = [];
 
-	public function getEmptyChunk($chunkX, $chunkZ){
-		return Chunk::getEmptyChunk($chunkX, $chunkZ, $this);
-	}
-
-	public static function createChunkSection($Y){
-		return new ChunkSection(new CompoundTag("", [
-			"Y" => new ByteTag("Y", $Y),
-			"Blocks" => new ByteArrayTag("Blocks", str_repeat("\x00", 4096)),
-			"Data" => new ByteArrayTag("Data", str_repeat("\x00", 2048)),
-			"SkyLight" => new ByteArrayTag("SkyLight", str_repeat("\xff", 2048)),
-			"BlockLight" => new ByteArrayTag("BlockLight", str_repeat("\x00", 2048))
-		]));
-	}
-
-	public function isChunkGenerated($chunkX, $chunkZ){
-		if(($region = $this->getRegion($chunkX >> 5, $chunkZ >> 5)) !== null){
-			return $region->chunkExists($chunkX - $region->getX() * 32, $chunkZ - $region->getZ() * 32) and $this->getChunk($chunkX - $region->getX() * 32, $chunkZ - $region->getZ() * 32, true)->isGenerated();
+		foreach($this->getEntities() as $entity){
+			if(!($entity instanceof Player) and !$entity->closed){
+				$entity->saveNBT();
+				$entities[] = $entity->namedtag;
+			}
 		}
 
-		return false;
-	}
+		$nbt->Entities = new ListTag("Entities", $entities);
+		$nbt->Entities->setTagType(NBT::TAG_Compound);
 
-	protected function loadRegion($x, $z){
-		if(isset($this->regions[$index = Level::chunkHash($x, $z)])){
-			return true;
+
+		$tiles = [];
+		foreach($this->getTiles() as $tile){
+			$tile->saveNBT();
+			$tiles[] = $tile->namedtag;
 		}
 
-		$this->regions[$index] = new RegionLoader($this, $x, $z);
+		$nbt->TileEntities = new ListTag("TileEntities", $tiles);
+		$nbt->TileEntities->setTagType(NBT::TAG_Compound);
 
-		return true;
+		$extraData = new BinaryStream();
+		$extraData->putInt(count($this->getBlockExtraDataArray()));
+		foreach($this->getBlockExtraDataArray() as $key => $value){
+			$extraData->putInt($key);
+			$extraData->putShort($value);
+		}
+
+		$nbt->ExtraData = new ByteArrayTag("ExtraData", $extraData->getBuffer());
+
+		$writer = new NBT(NBT::BIG_ENDIAN);
+		$nbt->setName("Level");
+		$writer->setData(new CompoundTag("", ["Level" => $nbt]));
+
+		return $writer->write();
+	}
+
+	public function toBinary(){
+		$nbt = clone $this->getNBT();
+
+		$nbt->xPos = new IntTag("xPos", $this->x);
+		$nbt->zPos = new IntTag("zPos", $this->z);
+
+		$nbt->Sections = new ListTag("Sections", []);
+		$nbt->Sections->setTagType(NBT::TAG_Compound);
+		foreach($this->getSections() as $section){
+			if($section instanceof EmptyChunkSection){
+				continue;
+			}
+			$nbt->Sections[$section->getY()] = new CompoundTag(null, [
+				"Y" => new ByteTag("Y", $section->getY()),
+				"Blocks" => new ByteArrayTag("Blocks", $section->getIdArray()),
+				"Data" => new ByteArrayTag("Data", $section->getDataArray()),
+				"BlockLight" => new ByteArrayTag("BlockLight", $section->getLightArray()),
+				"SkyLight" => new ByteArrayTag("SkyLight", $section->getSkyLightArray())
+			]);
+		}
+
+		$nbt->BiomeColors = new IntArrayTag("BiomeColors", $this->getBiomeColorArray());
+
+		$nbt->HeightMap = new IntArrayTag("HeightMap", $this->getHeightMapArray());
+
+		$entities = [];
+
+		foreach($this->getEntities() as $entity){
+			if(!($entity instanceof Player) and !$entity->closed){
+				$entity->saveNBT();
+				$entities[] = $entity->namedtag;
+			}
+		}
+
+		$nbt->Entities = new ListTag("Entities", $entities);
+		$nbt->Entities->setTagType(NBT::TAG_Compound);
+
+
+		$tiles = [];
+		foreach($this->getTiles() as $tile){
+			$tile->saveNBT();
+			$tiles[] = $tile->namedtag;
+		}
+
+		$nbt->TileEntities = new ListTag("TileEntities", $tiles);
+		$nbt->TileEntities->setTagType(NBT::TAG_Compound);
+
+		$extraData = new BinaryStream();
+		$extraData->putInt(count($this->getBlockExtraDataArray()));
+		foreach($this->getBlockExtraDataArray() as $key => $value){
+			$extraData->putInt($key);
+			$extraData->putShort($value);
+		}
+
+		$nbt->ExtraData = new ByteArrayTag("ExtraData", $extraData->getBuffer());
+
+		$writer = new NBT(NBT::BIG_ENDIAN);
+		$nbt->setName("Level");
+		$writer->setData(new CompoundTag("", ["Level" => $nbt]));
+
+		return $writer->writeCompressed(ZLIB_ENCODING_DEFLATE, RegionLoader::$COMPRESSION_LEVEL);
+	}
+
+	/**
+	 * @param int           $chunkX
+	 * @param int           $chunkZ
+	 * @param LevelProvider $provider
+	 *
+	 * @return Chunk
+	 */
+	public static function getEmptyChunk($chunkX, $chunkZ, LevelProvider $provider = null){
+		try{
+			$chunk = new Chunk($provider instanceof LevelProvider ? $provider : Anvil::class, null);
+			$chunk->x = $chunkX;
+			$chunk->z = $chunkZ;
+
+			for($y = 0; $y < 8; ++$y){
+				$chunk->sections[$y] = new EmptyChunkSection($y);
+			}
+
+			$chunk->heightMap = array_fill(0, 256, 0);
+			$chunk->biomeColors = array_fill(0, 256, 0);
+
+			$chunk->nbt->V = new ByteTag("V", 1);
+			$chunk->nbt->InhabitedTime = new LongTag("InhabitedTime", 0);
+			$chunk->nbt->TerrainGenerated = new ByteTag("TerrainGenerated", 0);
+			$chunk->nbt->TerrainPopulated = new ByteTag("TerrainPopulated", 0);
+			$chunk->nbt->LightPopulated = new ByteTag("LightPopulated", 0);
+
+			return $chunk;
+		}catch(\Throwable $e){
+			return null;
+		}
 	}
 }
